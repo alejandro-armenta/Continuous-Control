@@ -9,13 +9,15 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-BUFFER_SIZE = int(1e6)  # replay buffer size
-BATCH_SIZE = 128        # minibatch size
+BUFFER_SIZE = int(1e5)  # replay buffer size
+BATCH_SIZE = 64        # minibatch size
 GAMMA = 0.99            # discount factor
 TAU = 1e-3              # for soft update of target parameters
 LR_ACTOR = 1e-4         # learning rate of the actor 
-LR_CRITIC = 3e-4        # learning rate of the critic
-WEIGHT_DECAY = 0.0001   # L2 weight decay
+LR_CRITIC = 1e-3        # learning rate of the critic
+WEIGHT_DECAY = 1e-2        # L2 weight decay
+UPDATE_EVERY = 6        # how often to update the network
+UPDATE_COUNT = 1        # how many times to update the network each update step!
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -50,28 +52,32 @@ class Agent():
 
         # Replay memory
         self.memory = ReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, random_seed)
+        
+        self.t_step = 0
     
     def step(self, state, action, reward, next_state, done):
         """Save experience in replay memory, and use random sample from buffer to learn."""
         # Save experience / reward
-        #este es un sarsamax!
         self.memory.add(state, action, reward, next_state, done)
 
         # Learn, if enough samples are available in memory
-        if len(self.memory) > BATCH_SIZE:
-            experiences = self.memory.sample()
-            self.learn(experiences, GAMMA)
+        
+        self.t_step = (self.t_step + 1) % UPDATE_EVERY
+        
+        if self.t_step == 0:
+            if len(self.memory) > BATCH_SIZE:
+                for i in range(UPDATE_COUNT):
+                    experiences = self.memory.sample()
+                    self.learn(experiences, GAMMA)
 
     def act(self, state, add_noise=True):
         """Returns actions for given state as per current policy."""
         state = torch.from_numpy(state).float().to(device)
-        #esto es un seguro para evitar training en el modelo en el actor!
         self.actor_local.eval()
         with torch.no_grad():
             action = self.actor_local(state).cpu().data.numpy()
         self.actor_local.train()
         if add_noise:
-            # this is like epislon greedy sampling!
             action += self.noise.sample()
         return np.clip(action, -1, 1)
 
@@ -94,16 +100,8 @@ class Agent():
 
         # ---------------------------- update critic ---------------------------- #
         # Get predicted next-state actions and Q values from target models
-        
-        print("next_states: ", next_states.shape)
-        
         actions_next = self.actor_target(next_states)
-        
-        print("actions_next: ", actions_next.shape)
-        
         Q_targets_next = self.critic_target(next_states, actions_next)
-        
-        print("Q_targets_next: ", Q_targets_next.shape)
         # Compute Q targets for current states (y_i)
         Q_targets = rewards + (gamma * Q_targets_next * (1 - dones))
         # Compute critic loss
@@ -112,14 +110,12 @@ class Agent():
         # Minimize the loss
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic_local.parameters(), 1)
         self.critic_optimizer.step()
 
         # ---------------------------- update actor ---------------------------- #
         # Compute actor loss
-        #actions pred es un vector stados con la politica actual!
         actions_pred = self.actor_local(states)
-        #gradient ascent!
-        # esta cosa usa la DQN para calcular el loss!
         actor_loss = -self.critic_local(states, actions_pred).mean()
         # Minimize the loss
         self.actor_optimizer.zero_grad()
@@ -146,7 +142,7 @@ class Agent():
 class OUNoise:
     """Ornstein-Uhlenbeck process."""
 
-    def __init__(self, size, seed, mu=0., theta=0.15, sigma=0.2):
+    def __init__(self, size, seed, mu=0., theta=0.15, sigma=0.1):
         """Initialize parameters and noise process."""
         self.mu = mu * np.ones(size)
         self.theta = theta
@@ -160,14 +156,12 @@ class OUNoise:
 
     def sample(self):
         """Update internal state and return it as a noise sample."""
-        #mu no se mueve!
-        # dt = 1
-        
-        dx = self.theta * (self.mu - self.state) + self.sigma * np.array([random.random() for i in range(len(self.state))])
-        
-        self.state = self.state + dx
+        x = self.state
+        dx = self.theta * (self.mu - x) + self.sigma * np.array([random.random() for i in range(len(x))])
+        self.state = x + dx
         return self.state
-
+    
+    
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
 
@@ -184,12 +178,10 @@ class ReplayBuffer:
         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
         self.seed = random.seed(seed)
     
-    def add(self, states, actions, rewards, next_states, dones):
+    def add(self, state, action, reward, next_state, done):
         """Add a new experience to memory."""
-        
-        es = [self.experience(state, action, reward, next_state, done) for state, action, reward, next_state, done in zip(states,actions,rewards,next_states,dones)]
-        for e in es:
-            self.memory.append(e)
+        e = self.experience(state, action, reward, next_state, done)
+        self.memory.append(e)
     
     def sample(self):
         """Randomly sample a batch of experiences from memory."""
